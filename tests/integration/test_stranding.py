@@ -13,7 +13,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -56,7 +56,7 @@ class TestStranding(unittest.TestCase):
         self.assertEqual(o.num_elements_total(), 100)
 
     def test_stranding_roms(self):
-        o = PelagicEggDrift(loglevel=0)
+        o = PelagicEggDrift(loglevel=20)
         reader_arctic = reader_netCDF_CF_generic.Reader(o.test_data_folder() +
         '2Feb2016_Nordic_sigma_3d/Arctic20_1to5Feb_2016.nc')
         reader_nordic = reader_ROMS_native.Reader(o.test_data_folder() +
@@ -92,7 +92,7 @@ class TestStranding(unittest.TestCase):
         lons = [12.930, 13.348, 12.444]
 
         for i, option in enumerate(options):
-            o = OceanDrift(loglevel=00)
+            o = OceanDrift(loglevel=20)
             o.set_config('general:coastline_action', option)
             o.add_reader([reader_osc, reader_global])
             # Adding northwards drift
@@ -114,7 +114,7 @@ class TestStranding(unittest.TestCase):
     def test_interact_coastline_global(self):
         reader_global = reader_global_landmask.Reader()
 
-        o = OceanDrift(loglevel=00)
+        o = OceanDrift(loglevel=20)
         o.add_reader(reader_global)
         o.set_config('general:coastline_action', 'previous')
         o.set_config('general:use_auto_landmask', False)

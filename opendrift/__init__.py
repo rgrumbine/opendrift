@@ -7,6 +7,7 @@ Opendrift module
 import logging
 import unittest
 import importlib
+import platform
 import numpy as np
 import time
 from datetime import timedelta
@@ -17,7 +18,8 @@ from .version import __version__
 _available_models = \
     ['leeway.Leeway',
      'openoil.OpenOil',
-     'shipdrift.ShipDrift']
+     'shipdrift.ShipDrift',
+     'openberg.OpenBerg']
 
 def get_model_names():
     return [m.split('.')[-1] for m in _available_models]
@@ -77,6 +79,7 @@ def versions():
     s = '\n------------------------------------------------------\n'
     s += 'Software and hardware:\n'
     s += '  OpenDrift version %s\n' % __version__
+    s += '  Platform: %s, %s\n' % (platform.system(), platform.release())
     try:
         from psutil import virtual_memory
         ram = virtual_memory().total/(1024**3)

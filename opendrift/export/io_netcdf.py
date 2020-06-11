@@ -1,16 +1,14 @@
-from future.utils import iteritems
 import sys
 from datetime import datetime, timedelta
 import string
 from shutil import move
-import logging
 
 import numpy as np
 from netCDF4 import Dataset, num2date, date2num
 
 # Module with functions to export/import trajectory data to/from netCDF file
 # Strives to be compliant with netCDF CF-convention on trajectories
-# http://cfconventions.org/Data/cf-conventions/cf-conventions-1.6/build/cf-conventions.html#idp8377728
+# https://cfconventions.org/Data/cf-conventions/cf-conventions-1.6/build/cf-conventions.html#idp8377728
 # https://geo-ide.noaa.gov/wiki/index.php?title=NODC_NetCDF_Trajectory_Template
 
 skip_parameters = ['ID']  # Do not write to file
@@ -60,7 +58,7 @@ def init(self, filename):
 
     # Write additionaly metadata attributes, if given
     if hasattr(self, 'metadata_dict'):
-        for key, value in iteritems(self.metadata_dict):
+        for key, value in self.metadata_dict.items():
             self.outfile.setncattr(key, str(value))
 
     # Add all element properties as variables
@@ -108,7 +106,7 @@ def write_buffer(self):
     self.outfile.variables['status'].flag_meanings = \
         " ".join(self.status_categories)
 
-    logging.info('Wrote %s steps to file %s' % (num_steps_to_export,
+    self.logger.info('Wrote %s steps to file %s' % (num_steps_to_export,
                                                 self.outfile_name))
     self.history.mask = True  # Reset history array, for new data
     self.steps_exported = self.steps_exported + num_steps_to_export
@@ -148,23 +146,23 @@ def close(self):
 
     # Finally changing UNLIMITED time dimension to fixed, for CDM compliance.
     # Fortunately this is quite fast.
-    # http://www.unidata.ucar.edu/software/thredds/current/netcdf-java/reference/FeatureDatasets/CFpointImplement.html
+    # https://www.unidata.ucar.edu/software/thredds/current/netcdf-java/reference/FeatureDatasets/CFpointImplement.html
     try:
-        logging.debug('Making netCDF file CDM compliant with fixed dimensions')
+        self.logger.debug('Making netCDF file CDM compliant with fixed dimensions')
         if self.num_elements_scheduled() > 0:
-            logging.info('Removing %i unseeded elements already written to file' % self.num_elements_scheduled())
+            self.logger.info('Removing %i unseeded elements already written to file' % self.num_elements_scheduled())
             mask = np.ones(self.history.shape[0], dtype=bool)
             mask[self.elements_scheduled.ID-1] = False
         with Dataset(self.outfile_name) as src, \
                 Dataset(self.outfile_name + '_tmp', 'w') as dst:
-            for name, dimension in iteritems(src.dimensions):
+            for name, dimension in src.dimensions.items():
                 if name=='trajectory':
                     # Truncate dimension length to  number actually seeded
                     dst.createDimension(name, self.num_elements_activated())
                 else:
                     dst.createDimension(name, len(dimension))
 
-            for name, variable in iteritems(src.variables):
+            for name, variable in src.variables.items():
                 dstVar = dst.createVariable(name, variable.datatype,
                                              variable.dimensions)
                 srcVar = src.variables[name]
@@ -194,7 +192,7 @@ def close(self):
 
 def import_file(self, filename, times=None):
 
-    logging.debug('Importing from ' + filename)
+    self.logger.debug('Importing from ' + filename)
     infile = Dataset(filename, 'r')
     # 'times' can be used to import subset. Not yet implemented.
     if times is None and hasattr(infile, 'steps_exported'):
@@ -242,7 +240,7 @@ def import_file(self, filename, times=None):
         try:
             self.history[var] = infile.variables[var][:, 0:self.steps_output]
         except Exception as e:
-            logging.info(e)
+            self.logger.info(e)
             pass
 
     # Initialise elements from given (or last) state/time
@@ -274,21 +272,28 @@ def import_file(self, filename, times=None):
                 value = None
             try:
                 self.set_config(conf_key, value)
-                logging.debug('Setting imported config: %s -> %s' %
+                self.logger.debug('Setting imported config: %s -> %s' %
                              (conf_key, value))
             except:
-                logging.warning('Could not set config: %s -> %s' %
+                self.logger.warning('Could not set config: %s -> %s' %
                                 (conf_key, value))
 
     # Import time steps from metadata
+    def timedelta_from_string(timestring):
+        if 'day' in timestring:
+            days = int(timestring.split('day')[0])
+            hs = timestring.split(' ')[-1]
+            th = datetime.strptime(hs, '%H:%M:%S')
+            return timedelta(days=days, hours=th.hour, minutes=th.minute, seconds=th.second)
+        else:
+            t = datetime.strptime(timestring, '%H:%M:%S')
+            return timedelta(
+                hours=t.hour, minutes=t.minute, seconds=t.second)
     try:
-        t = datetime.strptime(infile.time_step_calculation, '%H:%M:%S')
-        self.time_step = timedelta(
-            hours=t.hour, minutes=t.minute, seconds=t.second)
-        t = datetime.strptime(infile.time_step_output, '%H:%M:%S')
-        self.time_step_output = timedelta(
-            hours=t.hour, minutes=t.minute, seconds=t.second)
-    except:
-        logging.warning('Could not parse time_steps from netCDF file')
+        self.time_step = timedelta_from_string(infile.time_step_calculation)
+        self.time_step_output = timedelta_from_string(infile.time_step_output)
+    except Exception as e:
+        self.logger.warning(e)
+        self.logger.warning('Could not parse time_steps from netCDF file')
 
     infile.close()

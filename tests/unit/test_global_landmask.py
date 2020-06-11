@@ -5,6 +5,43 @@ from opendrift.readers import reader_global_landmask
 from opendrift.readers import reader_ROMS_native
 from opendrift.models.oceandrift import OceanDrift
 
+def test_landmask_generate():
+    import os, tempfile
+
+    tmpdir = os.path.join (tempfile.gettempdir(), 'landmask')
+    mmapf = os.path.join(tmpdir, 'mask.dat')
+
+    if os.path.exists(mmapf): os.unlink(mmapf)
+
+    import opendrift_landmask_data as old
+    l = old.Landmask()
+
+    assert os.path.exists(mmapf)
+
+def test_reader_landmask_generate():
+    import os, tempfile
+
+    tmpdir = os.path.join (tempfile.gettempdir(), 'landmask')
+    mmapf = os.path.join(tmpdir, 'mask.dat')
+
+    if os.path.exists(mmapf): os.unlink(mmapf)
+
+    reader_global = reader_global_landmask.Reader()
+
+    assert os.path.exists(mmapf)
+
+def test_reader_landmask_generate_extent():
+    import os, tempfile
+
+    tmpdir = os.path.join (tempfile.gettempdir(), 'landmask')
+    mmapf = os.path.join(tmpdir, 'mask.dat')
+
+    if os.path.exists(mmapf): os.unlink(mmapf)
+
+    reader_global = reader_global_landmask.Reader (extent = [4, 55, 11, 65])
+
+    assert os.path.exists(mmapf)
+
 def test_landmask_global():
     reader_global = reader_global_landmask.Reader (extent = [4, 55, 11, 65])
 
@@ -65,4 +102,30 @@ def test_plot(tmpdir):
     # ax.set_global()
     # plt.show()
     plt.savefig('%s/cartplot.png' % tmpdir)
+
+
+def test_global_setup(benchmark):
+    benchmark(reader_global_landmask.Reader)
+
+@pytest.mark.slow
+def test_performance_global(benchmark):
+    print("setting up global landmask")
+    reader_global = reader_global_landmask.Reader(
+            extent = [18.64, 69.537, 19.37, 69.81])
+
+
+    x = np.linspace(18.641, 19.369, 100)
+    y = np.linspace(69.538, 69.80, 100)
+
+    xx, yy = np.meshgrid(x,y)
+    xx = xx.ravel()
+    yy = yy.ravel()
+
+    print ("points:", len(xx))
+
+    # warmup
+    reader_global.__on_land__(xx, yy)
+
+    print ("masking against cartopy")
+    benchmark(reader_global.__on_land__, xx,yy)
 

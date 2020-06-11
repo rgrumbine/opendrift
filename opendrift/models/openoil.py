@@ -10,7 +10,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -143,6 +143,7 @@ class OpenOil(OpenDriftSimulation):
                           'sea_surface_wave_stokes_drift_x_velocity',
                           'sea_surface_wave_stokes_drift_y_velocity',
                           'sea_ice_area_fraction',
+                          'sea_ice_x_velocity', 'sea_ice_y_velocity',
                           'sea_water_temperature',
                           'sea_floor_depth_below_sea_level',
                           'x_wind', 'y_wind', 'land_binary_mask']
@@ -154,6 +155,8 @@ class OpenOil(OpenDriftSimulation):
                        'sea_surface_wave_stokes_drift_y_velocity': 0,
                        'sea_floor_depth_below_sea_level': 0,
                        'sea_ice_area_fraction': 0,
+                       'sea_ice_x_velocity': 0,
+                       'sea_ice_y_velocity': 0,
                        'sea_water_temperature': 12,
                        'x_wind': 0, 'y_wind': 0}
 
@@ -192,7 +195,8 @@ class OpenOil(OpenDriftSimulation):
     # Workaround as ADIOS oil library uses
     # max water fraction of 0.9 for all crude oils
     max_water_fraction  = {
-        'MARINE GAS OIL 500 ppm S 2017': 0.1}
+        'MARINE GAS OIL 500 ppm S 2017': 0.1,
+        'FENJA (PIL) 2015': .75}
 
 
     def __init__(self, weathering_model='default', *args, **kwargs):
@@ -257,9 +261,9 @@ class OpenOil(OpenDriftSimulation):
         from scipy.stats import binned_statistic_2d
         surface = np.where(self.elements.z == 0)[0]
         if len(surface) == 0:
-            print('No oil at surface, no film thickness to update')
+            self.logger.debug('No oil at surface, no film thickness to update')
             return
-        print('Updating oil film thickness for %s of %s elements at surface' % (len(surface), self.num_elements_active()))
+        self.logger.debug('Updating oil film thickness for %s of %s elements at surface' % (len(surface), self.num_elements_active()))
         meanlon = self.elements.lon[surface].mean()
         meanlat = self.elements.lat[surface].mean()
         # Using stereographic coordinates to get regular X and Y
@@ -278,11 +282,11 @@ class OpenOil(OpenDriftSimulation):
         max_thickness = 0.01  # 1 cm
         min_thickness = 1e-9  # 1 nanometer
         if film_thickness.max() > max_thickness:
-            print('Warning: decreasing thickness to %sm for %s of %s bins' % (max_thickness, np.sum(film_thickness>max_thickness), film_thickness.size))
+            self.logger.debug('Warning: decreasing thickness to %sm for %s of %s bins' % (max_thickness, np.sum(film_thickness>max_thickness), film_thickness.size))
             film_thickness[film_thickness>max_thickness] = max_thickness
         num_too_thin = np.sum((film_thickness<min_thickness) & (film_thickness>0))
         if num_too_thin > 0:
-            print('Warning: increasing thickness to %sm for %s of %s bins' % (min_thickness, num_too_thin, film_thickness.size))
+            self.logger.debug('Warning: increasing thickness to %sm for %s of %s bins' % (min_thickness, num_too_thin, film_thickness.size))
             film_thickness[film_thickness<min_thickness] = min_thickness
 
         # https://github.com/scipy/scipy/issues/7010
@@ -510,22 +514,14 @@ class OpenOil(OpenDriftSimulation):
         #########################################################
         # Update density and viscosity according to temperature
         #########################################################
-        try:  # New version of OilLibrary
-            self.timer_start('main loop:updating elements:oil weathering:updating viscosities')
-            oil_viscosity = self.oiltype.kvis_at_temp(
-                self.environment.sea_water_temperature)
-            self.timer_end('main loop:updating elements:oil weathering:updating viscosities')
-            self.timer_start('main loop:updating elements:oil weathering:updating densities')
-            oil_density = self.oiltype.density_at_temp(
-                self.environment.sea_water_temperature)
-            self.timer_end('main loop:updating elements:oil weathering:updating densities')
-        except:  # Old version of OilLibrary
-            oil_viscosity = np.array(
-                [self.oiltype.get_viscosity(t) for t in
-                 self.environment.sea_water_temperature])
-            oil_density = np.array(
-                [self.oiltype.get_density(t) for t in
-                 self.environment.sea_water_temperature])
+        self.timer_start('main loop:updating elements:oil weathering:updating viscosities')
+        oil_viscosity = self.oiltype.kvis_at_temp(
+            self.environment.sea_water_temperature)
+        self.timer_end('main loop:updating elements:oil weathering:updating viscosities')
+        self.timer_start('main loop:updating elements:oil weathering:updating densities')
+        oil_density = self.oiltype.density_at_temp(
+            self.environment.sea_water_temperature)
+        self.timer_end('main loop:updating elements:oil weathering:updating densities')
 
         # Calculate emulsion density
         self.elements.density = (
@@ -684,20 +680,47 @@ class OpenOil(OpenDriftSimulation):
             ((6.0 / drop_max)*(Y_max/(1.0 - Y_max)))] = Y_max
 
     def advect_oil(self):
+
+        # Calculating various drift factors according to ice concentration
+        if hasattr(self.environment, 'sea_ice_area_fraction'):
+            A = self.environment.sea_ice_area_fraction
+            # According to 
+            # Nordam T, Beegle-Krause CJ, Skancke J, Nepstad R, Reed M.
+            # Improving oil spill trajectory modelling in the Arctic.
+            # Mar Pollut Bull. 2019;140:65-74.
+            # doi:10.1016/j.marpolbul.2019.01.019
+            k_ice = (A - 0.3) / (0.8 - 0.3)
+            k_ice[A<0.3] = 0
+            k_ice[A>0.8] = 1
+            if k_ice.max() > 0.3:
+                self.logger.info('Ice concentration above 30%, using Nordam scheme for advection in ice')
+            # Using decreased Stokes drift according to
+            # Arneborg, L. (2017). Oil drift modellling in pack ice
+            # - Sensitivity of oil-in-ice parameters.
+            # Ocean Engineering 144 (2017) 340-350
+            factor_stokes = (0.7 - A) / 0.7
+            factor_stokes[A>0.7] = 0
+        else:
+            k_ice = 0
+            factor_stokes = 1
+
         # Simply move particles with ambient current
-        self.advect_ocean_current()
+        self.advect_ocean_current(factor=1-k_ice)
 
         # Wind drag for elements at ocean surface
-        self.advect_wind()
+        self.advect_wind(factor=1-k_ice)
 
         # Stokes drift
-        self.stokes_drift()
+        self.stokes_drift(factor_stokes)
 
-        # Deactivate elements hitting sea ice
-        if hasattr(self.environment, 'sea_ice_area_fraction'):
-            self.deactivate_elements(
-                self.environment.sea_ice_area_fraction > 0.6,
-                reason='oil-in-ice')
+        # Advect with ice
+        self.advect_with_sea_ice(factor=k_ice)
+
+        ## Deactivate elements hitting sea ice
+        #if hasattr(self.environment, 'sea_ice_area_fraction'):
+        #    self.deactivate_elements(
+        #        self.environment.sea_ice_area_fraction > 0.6,
+        #        reason='oil-in-ice')
 
     def update(self):
         """Update positions and properties of oil particles."""
@@ -776,10 +799,8 @@ class OpenOil(OpenDriftSimulation):
 
         return oil_budget
 
-    def plot_oil_budget(self, filename=None, ax=None):
-
-        if ax==None:
-            plt.close()
+    def plot_oil_budget(self, filename=None, ax=None, show_density_viscosity=True,
+                        show_wind_and_current=True):
 
         if self.time_step.days < 0:  # Backwards simulation
             fig = plt.figure(figsize=(10, 6.))
@@ -789,7 +810,8 @@ class OpenOil(OpenDriftSimulation):
             if filename is not None:
                 plt.savefig(filename)
                 plt.close()
-            plt.show()
+            else:
+                plt.show()
             return
 
         b = self.get_oil_budget()
@@ -804,10 +826,23 @@ class OpenOil(OpenDriftSimulation):
         time, time_relative = self.get_time_array()
         time = np.array([t.total_seconds()/3600. for t in time_relative])
 
-        if ax==None:
-            fig = plt.figure(figsize=(10, 6.))  # Suitable aspect ratio
+        if ax is None:
             # Left axis showing oil mass
-            ax1 = fig.add_subplot(111)
+            nrows = 1
+            if show_density_viscosity is True:
+                nrows = nrows + 1
+            if show_wind_and_current is True:
+                nrows = nrows + 1
+            fig, axs = plt.subplots(nrows=nrows, ncols=1, figsize=(10, 6.+(nrows-1)*3))  # Suitable aspect ratio
+            #ax1 = fig.add_subplot(nrows=nrows, 1, 1)
+            if nrows == 1:
+                ax1 = axs
+            elif nrows >= 2:
+                ax1 = axs[0]
+                if show_density_viscosity is True:
+                    self.plot_oil_density_and_viscosity(ax=axs[1], show=False)
+                if show_wind_and_current is True:
+                    self.plot_environment(ax=axs[nrows-1], show=False)
         else:
             ax1 = ax
 
@@ -852,12 +887,8 @@ class OpenOil(OpenDriftSimulation):
         mass_total = b['mass_total'][-1]
         ax2.set_ylim([0, mass_total/oil_density])
         ax2.set_ylabel('Volume oil [m3]')
-        if not hasattr(self, 'oil_name'):  # TODO
-            self.oil_name = 'unknown oiltype'
-            # TODO line below is dangerous when importing old files
-            self.oil_name = self.get_config('seed:oil_type')
         plt.title('%s (%.1f kg/m3) - %s to %s' %
-                  (self.oil_name,
+                  (self.get_oil_name(),
                    oil_density,
                    self.start_time.strftime('%Y-%m-%d %H:%M'),
                    self.time.strftime('%Y-%m-%d %H:%M')))
@@ -872,7 +903,63 @@ class OpenOil(OpenDriftSimulation):
         if filename is not None:
             plt.savefig(filename)
             plt.close()
-        plt.show()
+        else:
+            plt.show()
+
+    def get_oil_name(self):
+        if not hasattr(self, 'oil_name'):  # TODO
+            return 'unknown oiltype'
+        else:
+            # TODO line below is dangerous when importing old files
+            return self.get_config('seed:oil_type')
+
+    def cumulative_oil_entrainment_fraction(self):
+        '''Returns the fraction of oil elements which has been entrained vs time'''
+        z = self.get_property('z')[0].copy()
+        z = np.ma.masked_where(z==0, z)
+        me = np.ma.notmasked_edges(z, axis=0)
+        maskfirst = me[0][0]
+        maskrow = me[0][1]
+        z = z*0
+        for mf, mr in zip(maskfirst, maskrow):
+            z[mf:z.shape[0], mr] = 1  # has been entrained
+        totentrained = np.sum(z, 1)
+        cumulative_fraction_entrained = np.sum(z, 1)/z.shape[1]
+        return cumulative_fraction_entrained
+
+    def plot_oil_density_and_viscosity(self, ax=None, show=True):
+        if ax is None:
+            fig, ax = plt.subplots()
+        import matplotlib.dates as mdates
+
+        time, time_relative = self.get_time_array()
+        time = np.array([t.total_seconds()/3600. for t in time_relative])
+        kin_viscosity = self.history['viscosity']
+        dyn_viscosity = kin_viscosity*self.history['density']
+        dyn_viscosity_mean = dyn_viscosity.mean(axis=0)
+        dyn_viscosity_std  = dyn_viscosity.std(axis=0)
+        density = self.history['density'].mean(axis=0)
+        density_std = self.history['density'].std(axis=0)
+
+        ax.plot(time, dyn_viscosity_mean, 'g', lw=2, label='Dynamical viscosity')
+        ax.fill_between(time, dyn_viscosity_mean-dyn_viscosity_std,
+                        dyn_viscosity_mean+dyn_viscosity_std, color='g', alpha=0.5)
+        ax.set_ylim([0,max(dyn_viscosity_mean+dyn_viscosity_std)])
+        ax.set_ylabel(r'Dynamical viscosity  [cPoise] / [mPas]', color='g')
+        ax.tick_params(axis='y', colors='g')
+
+        axb = ax.twinx()
+        axb.plot(time, density, 'b', lw=2, label='Density')
+        axb.fill_between(time, density-density_std, density+density_std, color='b', alpha=0.5)
+        ax.set_xlim([0, time.max()])
+        ax.set_xlabel('Time [hours]')
+        axb.set_ylabel(r'Density  [kg/m3]', color='b')
+        axb.tick_params(axis='y', colors='b')
+
+        ax.legend(loc='upper left')
+        axb.legend(loc='lower right')
+        if show is True:
+            plt.show()
 
     def set_oiltype(self, oiltype):
         self.oil_name = oiltype
@@ -1064,7 +1151,7 @@ class OpenOil(OpenDriftSimulation):
         import ogr
         import osr
 
-        if not 'time' is kwargs:
+        if not 'time' in kwargs:
             try:  # get time from filename
                 timestr = filename[-28:-13]
                 time = datetime.strptime(
@@ -1142,3 +1229,5 @@ class OpenOil(OpenDriftSimulation):
                 mass_oil=mass_oil[i]/num,
                 number=num, time=time, *args, **kwargs)
 
+    def _figure_title(self):
+        return str(type(self).__name__) + '  (%s)' % self.get_oil_name()

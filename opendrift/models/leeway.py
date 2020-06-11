@@ -10,7 +10,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -147,7 +147,8 @@ class Leeway(OpenDriftSimulation):
                          overwrite=True)
 
     def seed_elements(self, lon, lat, radius=0, number=1, time=None,
-                      objectType=None, cone=None, jibeProbability=None):
+                      objectType=None, cone=None, jibeProbability=None,
+                      **kwargs):
         """Seed particles in a cone-shaped area over a time period."""
         # All particles carry their own objectType (number),
         # but so far we only use one for each sim
@@ -251,14 +252,14 @@ class Leeway(OpenDriftSimulation):
         # with the specific values calculated
         super(Leeway, self).seed_elements(
             lon=lon, lat=lat, radius=radius,
-            number=number, time=time, cone=True,
+            number=number, time=time, cone=cone,
             orientation=orientation, objectType=objectType,
             downwindSlope=downwindSlope,
             crosswindSlope=crosswindSlope,
             downwindOffset=downwindOffset,
             crosswindOffset=crosswindOffset,
             downwindEps=downwindEps, crosswindEps=crosswindEps,
-            jibeProbability=jibeProbability)
+            jibeProbability=jibeProbability, **kwargs)
 
     def list_object_categories(self, substr=None):
         '''Display leeway categories to screen
@@ -414,3 +415,7 @@ class Leeway(OpenDriftSimulation):
                         orientation[i]))
 
         f.close()
+
+    def _figure_title(self):
+        return str(type(self).__name__) + '  (%s)' % self.leewayprop[
+            self.elements.objectType[0]]['OBJKEY']

@@ -13,7 +13,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -214,6 +214,7 @@ class TestRun(unittest.TestCase):
                                   number=300, layername=None,
                                   featurenum=None, time=datetime.now())
         self.assertEqual(len(o.elements_scheduled), 400)
+        self.assertAlmostEqual(o.elements_scheduled.lat[-1], 52.5, 2)
 
     #@unittest.skipIf(has_ogr is False,
     #                 'GDAL library needed to read shapefiles')
@@ -319,7 +320,7 @@ class TestRun(unittest.TestCase):
 
         o1.run(steps=20, time_step=300, time_step_output=1800,
                export_buffer_length=10, outfile='verticalmixing.nc')
-        self.assertAlmostEqual(o1.history['z'].min(), -31.9, 1)
+        self.assertAlmostEqual(o1.history['z'].min(), -38.1, 1)
         self.assertAlmostEqual(o1.history['z'].max(), 0.0, 1)
         os.remove('verticalmixing.nc')
 
@@ -578,7 +579,7 @@ class TestRun(unittest.TestCase):
         #o.plot_property('z')
         z, status = o.get_property('z')
         self.assertAlmostEqual(z[0,0], -151.7, 1)  # Seeded at seafloor depth
-        self.assertAlmostEqual(z[-1,0], -91.4, 1)  # After some rising
+        self.assertAlmostEqual(z[-1,0], -94.0, 1)  # After some rising
 
     def test_seed_above_seafloor(self):
         o = OpenOil3D(loglevel=20)
@@ -600,7 +601,7 @@ class TestRun(unittest.TestCase):
         #o.plot_property('z')
         z, status = o.get_property('z')
         self.assertAlmostEqual(z[0,0], -101.7, 1)  # Seeded at seafloor depth
-        self.assertAlmostEqual(z[-1,0], -41.8, 1)  # After some rising
+        self.assertAlmostEqual(z[-1,0], -44.3, 1)  # After some rising
 
     def test_seed_below_reader_coverage(self):
         o = OpenOil3D(loglevel=20)
@@ -620,7 +621,7 @@ class TestRun(unittest.TestCase):
         o.set_config('input:spill:droplet_diameter_max_subsea', 0.005)
         o.run(steps=3, time_step=300, time_step_output=300)
         z, status = o.get_property('z')
-        self.assertAlmostEqual(z[-1,0], -289.3, 1)  # After some rising
+        self.assertAlmostEqual(z[-1,0], -291.7, 1)  # After some rising
 
     def test_seed_below_seafloor(self):
         o = OpenOil3D(loglevel=20)
@@ -642,7 +643,7 @@ class TestRun(unittest.TestCase):
         o.run(steps=3, time_step=300, time_step_output=300)
         z, status = o.get_property('z')
         self.assertAlmostEqual(z[0,0], -151.7, 1)  # Seeded at seafloor depth
-        self.assertAlmostEqual(z[-1,0], -91.4, 1)  # After some rising
+        self.assertAlmostEqual(z[-1,0], -94.0, 1)  # After some rising
 
     def test_seed_below_seafloor_deactivating(self):
         o = OpenOil3D(loglevel=50)
@@ -668,7 +669,7 @@ class TestRun(unittest.TestCase):
         self.assertEqual(o.num_elements_active(), 1)
         self.assertEqual(o.num_elements_deactivated(), 1)
         self.assertAlmostEqual(z[0,1], -100, 1)  # Seeded at seafloor depth
-        self.assertAlmostEqual(z[-1,1], -32.6, 1)  # After some rising
+        self.assertAlmostEqual(z[-1,1], -35.7, 1)  # After some rising
 
     def test_lift_above_seafloor(self):
         # See an element at some depth, and progapate towards coast
@@ -791,6 +792,21 @@ class TestRun(unittest.TestCase):
         self.assertEqual(o.history['origin_marker'].min(), 7)
         self.assertEqual(o.history['origin_marker'].max(), 8)
 
+    def test_no_active_but_still_unseeded_elements(self):
+        o = OceanDrift(loglevel=20)
+        # deactivate elements after 3 hours
+        o.set_config('drift:max_age_seconds', 3600*3)
+        norkyst = reader_netCDF_CF_generic.Reader(o.test_data_folder() + '14Jan2016_NorKyst_z_3d/NorKyst-800m_ZDEPTHS_his_00_3Dsubset.nc')
+        o.add_reader(norkyst)
+        # seed two elements at 6 hour interval
+        o.seed_elements(number=2, lon=4, lat=62,
+            time=[norkyst.start_time, norkyst.start_time+timedelta(hours=6)])
+        o.fallback_values['land_binary_mask'] = 0
+        o.run(duration=timedelta(hours=8), outfile='test.nc')
+        os.remove('test.nc')
+        # Check that simulations has run until scheduled end
+        self.assertEqual(o.steps_calculation, 8)
+
 @pytest.mark.slow
 def test_plot_animation(tmpdir):
     o = OceanDrift(loglevel=0)
@@ -807,6 +823,7 @@ def test_plot_animation(tmpdir):
     #o.animation(filename='test_plot.mp4')
     #assert os.path.exists('test_plot.mp4')
     #os.remove('test_plot.mp4')
+
 
 if __name__ == '__main__':
     unittest.main()

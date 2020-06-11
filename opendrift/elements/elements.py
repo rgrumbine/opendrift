@@ -10,14 +10,12 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
 from collections import OrderedDict
-
 import numpy as np
-
 
 class LagrangianArray(object):
     """A generic array-like class for Lagrangian particle tracking.
@@ -42,12 +40,12 @@ class LagrangianArray(object):
             the object after initialisation. These attributes will be
             numpy ndarrays of same length, or scalars. The core variables
             are:
-        ID: an integer identifying each particle.
-        status: 0 for active particles and a positive integer when deactivated
-        lon: longitude (np.float32)
-        lat: latitude (np.float32)
-        z: vertical position of the particle in m,
-            positive upwards (above sea surface)
+
+                - ID: an integer identifying each particle.
+                - status: 0 for active particles and a positive integer when deactivated
+                - lon: longitude (np.float32)
+                - lat: latitude (np.float32)
+                - z: vertical position of the particle in m, positive upwards (above sea surface)
     """
 
     variables = OrderedDict([
@@ -58,6 +56,9 @@ class LagrangianArray(object):
         ('age_seconds', {'dtype': np.float32,
                          'units': 's',
                          'default': 0}),
+        ('origin_marker', {'dtype': np.int16,
+                           'unit': '',
+                           'default': 0}),
         ('lon', {'dtype': np.float32,
                  'units': 'degrees_east',
                  'standard_name': 'longitude',

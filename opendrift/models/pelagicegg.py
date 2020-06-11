@@ -10,7 +10,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -77,7 +77,7 @@ class PelagicEggDrift(OpenDrift3DSimulation):
     # will be an array of size [vertical_levels, num_elements]
     # The vertical levels are available as
     # self.environment_profiles['z'] or
-    # self.environment_profiles['sigma'] (not yet implemented)
+    # self.environment_profiles['sigma'] 
     required_profiles = ['sea_water_temperature',
                          'sea_water_salinity',
                          'ocean_vertical_diffusivity']

@@ -10,7 +10,7 @@
 # GNU General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
-# along with OpenDrift.  If not, see <http://www.gnu.org/licenses/>.
+# along with OpenDrift.  If not, see <https://www.gnu.org/licenses/>.
 #
 # Copyright 2015, Knut-Frode Dagestad, MET Norway
 
@@ -105,6 +105,14 @@ class Reader(BaseReader):
                     self.Dataset = Dataset(filename, 'r')
         except Exception as e:
             raise ValueError(e)
+
+
+        if 'Vtransform' in self.Dataset.variables:
+            self.Vtransform = self.Dataset.variables['Vtransform'][:]
+        else:
+            self.logger.warning('Vtransform not found, using 1')
+            self.Vtransform = 1
+        self.Vtransform = np.asarray(self.Vtransform)
 
         if 's_rho' not in self.Dataset.variables:
             dimensions = 2
@@ -279,14 +287,16 @@ class Reader(BaseReader):
                     self.Dataset.variables['h'][:]
 
                 Htot = self.sea_floor_depth_below_sea_level
-                self.z_rho_tot = depth.sdepth(Htot, self.hc, self.Cs_r)
+                self.z_rho_tot = depth.sdepth(Htot, self.hc, self.Cs_r,
+                                              Vtransform=self.Vtransform)
 
             if has_xarray is False:
                 indxgrid, indygrid = np.meshgrid(indx, indy)
                 H = self.sea_floor_depth_below_sea_level[indygrid, indxgrid]
             else:
                 H = self.sea_floor_depth_below_sea_level[indy, indx]
-            z_rho = depth.sdepth(H, self.hc, self.Cs_r)
+            z_rho = depth.sdepth(H, self.hc, self.Cs_r,
+                                 Vtransform=self.Vtransform)
             # Element indices must be relative to extracted subset
             indx_el = np.clip(indx_el - indx.min(), 0, z_rho.shape[2]-1)
             indy_el = np.clip(indy_el - indy.min(), 0, z_rho.shape[1]-1)

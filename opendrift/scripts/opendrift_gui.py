@@ -17,6 +17,7 @@ import opendrift
 from opendrift.models.openoil3D import OpenOil3D
 from opendrift.models.leeway import Leeway
 from opendrift.models.shipdrift import ShipDrift
+from opendrift.models.openberg import OpenBerg
 
 
 class TextRedirector(object):
@@ -162,7 +163,7 @@ class OpenDriftGUI(tk.Tk):
         self.month.grid(row=30, column=1)
 
         self.yearvar = tk.StringVar()
-        self.years = range(2015, now.year+1)
+        self.years = range(2015, now.year+2)
         self.yearvar.set(now.year)
         self.year = tk.OptionMenu(self.start, self.yearvar, *self.years)
         self.year.grid(row=30, column=2)
@@ -225,7 +226,7 @@ class OpenDriftGUI(tk.Tk):
         self.emonth.grid(row=30, column=1)
 
         self.eyearvar = tk.StringVar()
-        self.eyears = range(2015, now.year+1)
+        self.eyears = range(2015, now.year+2)
         self.eyearvar.set(now.year)
         self.eyear = tk.OptionMenu(self.end, self.eyearvar, *self.eyears)
         self.eyear.grid(row=30, column=2)
@@ -368,6 +369,8 @@ class OpenDriftGUI(tk.Tk):
             self.o = Leeway()
         elif model == 'ShipDrift':
             self.o = ShipDrift()
+        elif model == 'OpenBerg':
+            self.o = OpenBerg()
 
         for con in self.config.winfo_children():
             con.destroy()
@@ -380,7 +383,7 @@ class OpenDriftGUI(tk.Tk):
         except:
             pass
         try:
-            # Removeing depth input boxes
+            # Removing depth input boxes
             self.depthlabel.destroy()
             self.depth.destroy()
             self.seafloor.destroy()
@@ -449,7 +452,7 @@ class OpenDriftGUI(tk.Tk):
             self.depth.config(state='normal')
 
     def show_help(self):
-        help_url = 'https://github.com/OpenDrift/opendrift/wiki/Graphical-User-Interface'
+        help_url = 'https://opendrift.github.io/gui.html'
         print('Opening help website:\n' + help_url)
         import webbrowser
         webbrowser.open(help_url)
