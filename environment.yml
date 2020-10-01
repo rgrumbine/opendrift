@@ -19,8 +19,11 @@ dependencies:
   - pytest-cov
   - pytest-benchmark
   - cartopy
+  - nc-time-axis
   - opendrift-landmask-data
   - oil_library-opendrift
   - pygrib
   - isodate
-
+  - pip
+  - pip:
+    - motuclient

@@ -43,26 +43,6 @@ def oil_wave_entrainment_rate_li2017(dynamic_viscosity, oil_density, interfacial
         entrainment_rate = (4.604e-10*we**1.805*oh**-1.023)*wave_breaking_fraction
     return entrainment_rate
 
-def oil_wave_entrainment_rate_tkalich2002(wind_speed=None, significant_wave_height=None,
-                                          wave_period=None, entrainment_length_scale=.3):
-    kb = 0.4
-    if wave_period is None:
-        if wind_speed is None:
-            raise ValueError('wave_period or wind_speed must be provided')
-        wave_period = wave_period_from_wind(wind_speed)    
-    if significant_wave_height is None:
-        if wind_speed is None:
-            raise ValueError('significant_wave_height or wind_speed must be provided')
-        significant_wave_height = significant_wave_height_from_wind_neumann_pierson(wind_speed)
-    kb = 0.4
-    alpha = 1.5
-    omega = (2.*np.pi)/wave_period
-    wave_energy = 9.81*1028*np.power(significant_wave_height, 2)/16
-    wave_damping_coefficient = (10E-5)*omega*np.power(wave_energy, 0.25)
-    entrainment_rate = kb*omega*wave_damping_coefficient*significant_wave_height / (
-                        16*alpha*entrainment_length_scale)
-    return entrainment_rate
-
 def significant_wave_height_from_wind_neumann_pierson(wind_speed):
     # Neumann and Pierson, 1966
     # WMO 1998
@@ -455,11 +435,19 @@ class PhysicsMethods(object):
             self.logger.debug('No Stokes drift velocity available')
             return
 
+        wave_height = self.significant_wave_height()
+        wave_period = self.wave_period()
+        if np.max(np.array(wave_height)) == 0:
+            self.logger.debug('Stokes drift is available, but not Hs: using Hs=1 for Stokes profile')
+            wave_height = 1
+        if np.max(np.array(wave_period)) == 0:
+            self.logger.debug('Stokes drift is available, but not Tp: using Tp=8 for Stokes profile')
+            wave_period = 8
+
         stokes_u, stokes_v, s = stokes_drift_profile_breivik(
             self.environment.sea_surface_wave_stokes_drift_x_velocity,
             self.environment.sea_surface_wave_stokes_drift_y_velocity,
-            self.significant_wave_height(), self.wave_period(),
-            self.elements.z)
+            wave_height, wave_period, self.elements.z)
 
         self.update_positions(stokes_u*factor, stokes_v*factor)
         if s.min() == s.max():
@@ -572,6 +560,10 @@ class PhysicsMethods(object):
     def wind_speed(self):
         return np.sqrt(self.environment.x_wind**2 +
                        self.environment.y_wind**2)
+
+    def current_speed(self):
+        return np.sqrt(self.environment.x_sea_water_velocity**2 +
+                       self.environment.y_sea_water_velocity**2)
 
     def significant_wave_height(self):
         # Significant wave height, parameterise from wind if not available

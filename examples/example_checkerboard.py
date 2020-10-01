@@ -17,6 +17,7 @@ reader_norkyst = reader_netCDF_CF_generic.Reader(o.test_data_folder() + '16Nov20
 
 o.add_reader([reader_norkyst])
 
+o.set_config('drift:vertical_mixing', False)
 #%%
 # Seeding particles in a checkerboard pattern
 di = 5 # Horizontal number of particles per square
@@ -37,7 +38,7 @@ o.seed_elements(lons, lats, radius=0, number=10000,
                 time=reader_norkyst.start_time)
 
 #%%
-# Running model (until end of driver data)
+# Running model
 o.run(steps=66*2, time_step=1800)
 
 #%%

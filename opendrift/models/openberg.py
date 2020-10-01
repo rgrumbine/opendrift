@@ -74,14 +74,14 @@ class IcebergObj(LagrangianArray):
     # We add the properties to the element class
     variables = LagrangianArray.add_variables([
         ('wind_drift_factor', {'dtype': np.float32,				# The fraction of the wind speed at which an iceberg is moved
-                       	     		'unit': '%',
-                       	        	'default': 0.018}),
+                               'units': '1',
+                       	       'default': 0.018}),
         ('water_line_length', {'dtype': np.float32,				# Iceberg size
-        							'unit': 'm',
-                       	        	'default': 90.5}),
+                               'units': 'm',
+                               'default': 90.5}),
         ('keel_depth', {'dtype': np.float32,					# Iceberg keel depth
-        							'unit': 'm',
-                       	        	'default': 60.})])
+                        'units': 'm',
+                        'default': 60.})])
 
 class OpenBerg(OpenDriftSimulation):
     """The Deterministic iceberg model in the OpenDrift framework.
@@ -103,14 +103,17 @@ class OpenBerg(OpenDriftSimulation):
                        'y_sea_water_velocity': 0.0}
 
     # Default colors for plotting
-    status_colors = {'initial': 'green', 'active': 'red',
-                     'missing_data': 'gray', 'stranded': 'blue'}
+    status_colors = {'initial': 'green', 'active': 'blue',
+                     'missing_data': 'gray', 'stranded': 'red'}
 
     configspec = '''
         [seed]
             wind_drift_factor = float(min=0, max=1, default=0.018)
             water_line_length = float(min=0.1, max=99999, default=90.5)
             keel_depth = float(min=.1, max=10000, default=60.0)
+        [drift]
+            current_uncertainty = float(min=0, max=5, default=0.15)
+            wind_uncertainty = float(min=0, max=5, default=1.5)
         '''
 
     # Configuration
@@ -121,7 +124,7 @@ class OpenBerg(OpenDriftSimulation):
         self.required_profiles = ['x_sea_water_velocity',
                                   'y_sea_water_velocity']  # Get vertical current profiles
 
-        self.required_profiles_z_range = [-190, 0] # [min_depth, max_depth]
+        self.required_profiles_z_range = [-120, 0] # [min_depth, max_depth]
 
         # Calling general constructor of parent class
         super(OpenBerg, self).__init__(*args, **kwargs)

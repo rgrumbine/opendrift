@@ -15,6 +15,7 @@ reader_norkyst = reader_netCDF_CF_generic.Reader(o.test_data_folder() + '16Nov20
 
 o.add_reader(reader_norkyst)
 #o.fallback_values['land_binary_mask'] = 0
+o.set_config('drift:vertical_mixing', False)
 
 #%%
 # Seeding some particles
@@ -27,7 +28,7 @@ o.seed_elements(lons, lats, radius=0, number=10000,
                 time=reader_norkyst.start_time)
 
 #%%
-# Running model (until end of driver data)
+# Running model
 o.run(steps=60*2, time_step=1800, time_step_output=1800)
 
 #%%

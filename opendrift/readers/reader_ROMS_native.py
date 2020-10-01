@@ -47,6 +47,8 @@ class Reader(BaseReader):
             'zeta': 'sea_surface_height',
             'u': 'x_sea_water_velocity',
             'v': 'y_sea_water_velocity',
+            'u_eastward': 'x_sea_water_velocity',
+            'v_northward': 'y_sea_water_velocity',
             'w': 'upward_sea_water_velocity',
             'temp': 'sea_water_temperature',
             'salt': 'sea_water_salinity',
@@ -93,6 +95,8 @@ class Reader(BaseReader):
                 if has_xarray is True:
                     self.Dataset = xr.open_mfdataset(filename,
                         chunks={'ocean_time': 1}, concat_dim='ocean_time',
+                        combine='by_coords',
+                        compat='override',
                         preprocess=drop_non_essential_vars_pop,
                         data_vars='minimal', coords='minimal')
                 else:
@@ -108,7 +112,10 @@ class Reader(BaseReader):
 
 
         if 'Vtransform' in self.Dataset.variables:
-            self.Vtransform = self.Dataset.variables['Vtransform'][:]
+            if has_xarray is True:
+                self.Vtransform = self.Dataset.variables['Vtransform'].data  # scalar
+            else:
+                self.Vtransform = self.Dataset.variables['Vtransform'][:]
         else:
             self.logger.warning('Vtransform not found, using 1')
             self.Vtransform = 1
@@ -149,6 +156,10 @@ class Reader(BaseReader):
             self.num_layers = 1
             self.ROMS_variable_mapping['ubar'] = 'x_sea_water_velocity'
             self.ROMS_variable_mapping['vbar'] = 'y_sea_water_velocity'
+            del self.ROMS_variable_mapping['u']
+            del self.ROMS_variable_mapping['v']
+
+        if 'u_eastward' in self.Dataset.variables:
             del self.ROMS_variable_mapping['u']
             del self.ROMS_variable_mapping['v']
 
@@ -532,6 +543,7 @@ class Reader(BaseReader):
                 rad = self.angle_xi_east[tuple(np.meshgrid(indy, indx))].T
             else:
                 rad = self.angle_xi_east[indy, indx]
+                rad = np.ma.asarray(rad)
             if 'x_sea_water_velocity' in variables.keys():
                 variables['x_sea_water_velocity'], \
                     variables['y_sea_water_velocity'] = rotate_vectors_angle(
