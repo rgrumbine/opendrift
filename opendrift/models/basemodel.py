@@ -20,6 +20,7 @@ import os
 import glob
 import types
 import traceback
+import inspect
 import logging; logging.captureWarnings(True)
 import warnings
 from datetime import datetime, timedelta
@@ -27,11 +28,12 @@ from collections import OrderedDict
 from abc import ABCMeta, abstractmethod, abstractproperty
 import netCDF4
 import nc_time_axis
+import xarray as xr
+from netCDF4 import Dataset, date2num
 
 import numpy as np
 import scipy
 import pyproj
-import configobj, validate
 try:
     import matplotlib
     matplotlib.rcParams['legend.numpoints'] = 1
@@ -122,32 +124,9 @@ class OpenDriftSimulation(PhysicsMethods):
                              'active': 'blue',
                              'missing_data': 'gray'}
 
-    configspec_basemodel = '''
-            [general]
-                use_auto_landmask = boolean(default=True)
-                coastline_action = option('none', 'stranding', 'previous', default='stranding')
-                time_step_minutes = integer(min=1, max=1440, default=60)
-                time_step_output_minutes = integer(min=1, max=1440, default=None)
-            [seed]
-                ocean_only = boolean(default=True)
-                number_of_elements = integer(min=1, max=100000000, default=1)
-            [drift]
-                max_age_seconds = float(min=0, default=None)
-                scheme = option('euler', 'runge-kutta', 'runge-kutta4', default='euler')
-                stokes_drift = boolean(default=True)
-                current_uncertainty = float(min=0, max=5, default=0)
-                current_uncertainty_uniform = float(min=0, max=5, default=0)
-                horizontal_diffusivity = float(min=0, max=100, default=0)
-                wind_uncertainty = float(min=0, max=5, default=0)
-                relative_wind = boolean(default=False)
-                lift_to_seafloor = boolean(default=True)
-                truncate_ocean_model_below_m = float(min=0, max=10000, default=None)
-                deactivate_north_of = float(min=-90, max=90, default=None)
-                deactivate_south_of = float(min=-90, max=90, default=None)
-                deactivate_east_of = float(min=-360, max=360, default=None)
-                deactivate_west_of = float(min=-360, max=360, default=None)
-                use_tabularised_stokes_drift = boolean(default=False)
-                tabularised_stokes_drift_fetch = option(5000, 25000, 50000, default=25000)'''
+    CONFIG_LEVEL_ESSENTIAL=1
+    CONFIG_LEVEL_BASIC=2
+    CONFIG_LEVEL_ADVANCED=3
 
     max_speed = 1  # Assumed max average speed of any element
     required_profiles = None  # Optional possibility to get vertical profiles
@@ -181,8 +160,6 @@ class OpenDriftSimulation(PhysicsMethods):
                      (e.g. '%H:%M:%S')
         """
 
-        # Set default configuration
-        self._add_configstring(self.configspec_basemodel)
         self.show_continuous_performance = False
 
         # Dict to store readers
@@ -249,6 +226,79 @@ class OpenDriftSimulation(PhysicsMethods):
         self.io_write_buffer = types.MethodType(io_module.write_buffer, self)
         self.io_close = types.MethodType(io_module.close, self)
         self.io_import_file = types.MethodType(io_module.import_file, self)
+        self.io_import_file_xarray = types.MethodType(io_module.import_file_xarray, self)
+
+        # Set configuration options
+        self._add_config({
+            # type, default, min, max, enum, important, value, units, description
+            'general:use_auto_landmask': {'type': 'bool', 'default': True,
+                'description': 'A built-in GSHHG global landmask is used if True, '
+                 'otherwise landmask is taken from reader or fallback value.',
+                 'level': self.CONFIG_LEVEL_ADVANCED},
+            'general:coastline_action': {'type': 'enum', 'enum': ['none', 'stranding', 'previous'],
+                'default': 'stranding', 'level': self.CONFIG_LEVEL_BASIC, 
+                 'description': 'None means that objects may also move over land. '
+                    'stranding means that objects are deactivated if they hit land. '
+                    'previous means that objects will move back to the previous location '
+                    'if they hit land'},
+            'general:time_step_minutes': {'type': 'float', 'min': .01, 'max': 1440, 'default': 60,
+                'units': 'minutes', 'level': self.CONFIG_LEVEL_BASIC, 'description':
+                'Calculation time step used for the simulation. The output time step may '
+                'be equal or larger than this.'},
+            'general:time_step_output_minutes': {'type': 'float', 'min': 1, 'max': 1440, 'default': None,
+                'units': 'minutes', 'level': self.CONFIG_LEVEL_BASIC, 'description':
+                'Output time step, i.e. the interval at which output is saved. This must be larger than '
+                'the calculation time step, and be an integer multiple of this.'},
+            'seed:ocean_only': {'type': 'bool', 'default': True,
+                'description': 'If True, elements seeded on land will be moved to the closest '
+                    'position in ocean.', 'level': self.CONFIG_LEVEL_ADVANCED},
+            'seed:number_of_elements': {'type': 'int', 'default': 1,
+                'min': 1, 'max': 100000000, 'units': 1,
+                'description': 'The number of elements for the simulation.',
+                'level': self.CONFIG_LEVEL_BASIC},
+            'drift:max_age_seconds': {'type': 'float', 'default': None,
+                'min': 0, 'max': np.inf, 'units': 'seconds',
+                'description': 'Elements will be deactivated when this age is reached..',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:scheme': {'type': 'enum', 'enum': ['euler', 'runge-kutta', 'runge-kutta4'], 'default': 'euler',
+                'level': self.CONFIG_LEVEL_ADVANCED, 'description':
+                'Numerical advection scheme for ocean current advection.'},
+            'drift:current_uncertainty': {'type': 'float', 'default': 0,
+                'min': 0, 'max': 5, 'units': 'm/s',
+                'description': 'Add gaussian perturbation with this standard deviation to current components at each time step.',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:current_uncertainty_uniform': {'type': 'float', 'default': 0,
+                'min': 0, 'max': 5, 'units': 'm/s',
+                'description': 'Add gaussian perturbation with this standard deviation to current components at each time step.',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:horizontal_diffusivity': {'type': 'float', 'default': 0,
+                'min': 0, 'max': 100, 'units': 'm2/s',
+                'description': 'Add horizontal diffusivity (random walk)',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:wind_uncertainty': {'type': 'float', 'default': 0,
+                'min': 0, 'max': 5, 'units': 'm/s',
+                'description': 'Add gaussian perturbation with this standard deviation to wind components at each time step.',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:relative_wind': {'type': 'bool', 'default': False,
+                'description': 'If True, wind drift is calculated for absolute wind (wind vector minus ocean surface current vector).',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:deactivate_north_of': {'type': 'float', 'default': None,
+                'min': -90, 'max': 90, 'units': 'degrees',
+                'description': 'Elements are deactivated if the move further north than this limit',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:deactivate_south_of': {'type': 'float', 'default': None,
+                'min': -90, 'max': 90, 'units': 'degrees',
+                'description': 'Elements are deactivated if the move further south than this limit',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:deactivate_east_of': {'type': 'float', 'default': None,
+                'min': -360, 'max': 360, 'units': 'degrees',
+                'description': 'Elements are deactivated if the move further east than this limit',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+            'drift:deactivate_west_of': {'type': 'float', 'default': None,
+                'min': -360, 'max': 360, 'units': 'degrees',
+                'description': 'Elements are deactivated if the move further west than this limit',
+                'level': self.CONFIG_LEVEL_ADVANCED},
+        })
 
         self.timer_start('total time')
         self.timer_start('configuration')
@@ -257,176 +307,144 @@ class OpenDriftSimulation(PhysicsMethods):
         self.logger.info('OpenDriftSimulation initialised (version %s)' %
                      opendrift.__version__)
 
-    def _add_config(self, key, value, comment, overwrite=False):
-        """Add a configuration item to the current model."""
-        if isinstance(value, list):
-            value = 'option(%s, default=\'%s\')' % (
-                     str(value)[1:-1], value[0])
-        cs = ''  # configstring
-        for i, s in enumerate(key.split(':')):
-            if i < len(key.split(':')) - 1:
-                cs += '\n' + '['*(i+1) + s + ']'*(i+1)
-            else:
-                cs += '\n\t' + s + ' = ' + value
-        newconf = configobj.ConfigObj(configspec=cs.split('\n'),
-                    encoding='utf8')
-        newconf.validate(validate.Validator())
-        if not hasattr(self, 'configobj'):
-            self.configobj = newconf
-        else:
-            self._merge_config(newconf, overwrite=True)
-
-    def _merge_config(self, newconf, overwrite=False):
-        if overwrite is True:
-            self.configobj.merge(newconf)
-            self.configobj.configspec.merge(newconf.configspec)
-        else:
-            newconf.configspec.merge(self.configobj.configspec)
-            self.configobj.configspec = newconf.configspec
-            newconf.merge(self.configobj)
-            self.configobj = newconf
-
-    def _add_configstring(self, configstring):
-        """Add several configuration items from string (INI-format)."""
-        newconf = configobj.ConfigObj(configspec=configstring.split('\n'),                      encoding='utf8')
-        newconf.validate(validate.Validator())
-        if not hasattr(self, 'configobj'):
-            self.configobj = newconf
-        else:
-            self.configobj.merge(newconf)
-            self.configobj.configspec.merge(newconf.configspec)
-
-    def set_config(self, key, value):
-        """Provide a value for a configuration setting"""
-        if key == 'general:use_basemap_landmask':
-            warnings.warn("use_basemap_landmask is deprecated in favor of use_auto_landmask", DeprecationWarning)
-            key = 'general:use_auto_landmask'
-
-        d = self.configobj
-        ds = self.configobj.configspec
-        default, minval, maxval, opt = self.get_configspec_default_min_max(key)
-        for i, s in enumerate(key.split(':')):
-            if s not in d:
-                self.list_configspec()
-                raise ValueError('Wrong configuration')
-            if not isinstance(d[s], dict):
-                if ds[s][0:5] == 'float' and value is not None:
-                    value = float(value)
-                if ds[s][0:5] == 'integ' and value is not None:
-                    value = int(value)
-                if isinstance(value, float) or isinstance(value, int):
-                    if (minval is not None and value<minval) or (maxval is not None and value>maxval):
-                        raise ValueError('Value of %s (%s) is outside allowed interval: (%s - %s)' %
-                                         (key, value, minval, maxval))
-                d[s] = value
-            else:
-                d = d[s]
-                ds = ds[s]
-        valid = self.configobj.validate(validate.Validator())
-        if self.configobj.validate(validate.Validator()) is not True:
-            if hasattr(self, 'oiltypes') or hasattr(self, 'leewayprop'):
-                # Provide some suggestion if config is very long list (e.g. oiltype/leewaycategory)
-                if hasattr(self, 'oiltypes'):
-                    elements = self.oiltypes
-                elif hasattr(self, 'leewayprop'):
-                    elements = [self.leewayprop[la]['OBJKEY'] for la in self.leewayprop]
-                import difflib
-                matches = difflib.get_close_matches(value, elements, n=20, cutoff=.3)
-                containing = [el for el in elements if value in el]
-                matches = list(set(matches) | set(containing))
-                if len(matches) > 0:
-                    matches.sort()
-                    suggestion = '\nDid you mean any of these?\n%s' % str(matches)
-                else:
-                    suggestion = ''
-                raise ValueError('Wrong configuration:\n\t%s = %s%s' % (s, ds[s], suggestion))
-
-    def _config_hash_to_dict(self, hashstring):
-        """Return configobj-dict from section:section:key format"""
-        c = self.configobj
-        cs = self.configobj.configspec
-        for i, s in enumerate(hashstring.split(':')):
-            if isinstance(c[s], dict):
-                c = c[s]
-                cs = cs[s]
-        return c, cs, s
-
-    def get_config(self, key):
-        """Get value of a configuration setting"""
-        c, cs, s = self._config_hash_to_dict(key)
-        return c[s]
-
-    def get_configspec(self, key):
-        """Get configuration specification of a configuration setting"""
-        c, cs, s = self._config_hash_to_dict(key)
-        return cs[s]
-
-    def get_configspec_default_min_max(self, key):
-        """Get default, min and max config values for configuration setting"""
-        c, cs, s = self._config_hash_to_dict(key)
-        v = validate.Validator()
-        default = v.get_default_value(cs[s])
-        datatype = cs[s].split('(')[0]
-        if datatype in ['float', 'integer'] and 'min' in cs[s] and 'max' in cs[s]:
-            minimum = cs[s].split('min=')[-1].split(',')[0]
-            maximum = cs[s].split('max=')[-1].split(',')[0]
-            if datatype == 'float':
-                minimum = float(minimum)
-                maximum = float(maximum)
-            elif datatype == 'integer':
-                minimum = int(minimum)
-                maximum = int(maximum)
-        else:
-            minimum = maximum = None
-        if datatype == 'option':
-            # Parsing options list
-            options = cs[s][len('options'):-1]
-            options = options.split('default=')[0][:-2]
-            import ast
-            options = ast.literal_eval('[' + options + ']')
-        else:
-            options = None
-        return default, minimum, maximum, options
-
-    def get_seed_config(self):
-        """Get dictionary with all config options under category seed"""
-        sc = {}
-        for c in self._config_hashstrings():
-            if c[0:5] == 'seed:':
-                name = c[5:]
-                sc[name] = {}
-                sn = sc[name]
-                sn['default'], sn['min'], sn['max'], sn['options'] = \
-                    self.get_configspec_default_min_max(c)
-        return sc
-
-    def _config_hashstrings(self):
-        """Get list of strings section:section:key for all config items"""
-        def fun(k, d, pre):
-            path = '%s:%s' % (pre, k) if pre else k
-            return path if type(d[k]) is not configobj.Section else \
-                ",".join([fun(i,d[k], path) for i in d[k]])
-        return ",".join([fun(k,self.configobj, '') for
-                         k in self.configobj]).split(',')
-
-    def list_configspec(self):
-        """List all possible configuration settings with specifications"""
-        keys = self._config_hashstrings()
-        str = '\n==============================================\n'
-        for key in keys:
-            str += '%s [%s] %s\n' % (key, self.get_config(key),
-                                   self.get_configspec(key))
-        str += '==============================================\n'
-        self.logger.info(str)
-
     def list_config(self):
         """List all possible configuration settings with values"""
-        keys = self._config_hashstrings()
         str = '\n=============================================\n'
-        for key in keys:
+        for key in self._config:
             str += '%s [%s]\n' % (key, self.get_config(key))
         str += '=============================================\n'
         self.logger.info(str)
+
+    def list_configspec(self):
+        """Readable formatting of config specification"""
+        for c, i in self._config.items():
+            val = i['value'] if 'value' in i else None
+            if i['type'] == 'bool':
+                rang=''
+            elif i['type'] in ['float', 'int']:
+                rang = 'min: %s, max: %s [%s]' % (i['min'], i['max'], i['units'])
+            elif i['type'] == 'enum':
+                rang = i['enum']
+            print('%-35s [%s] %-5s %s %s...' % (c, val, i['type'], rang, i['description'][0:20]))
+
+    def get_configspec(self, prefix='', level=[1,2,3]):
+        if not isinstance(level, list):
+            level = [level]
+        configspec = {k:v for (k,v) in self._config.items() if k.startswith(prefix)
+                        and self._config[k]['level'] in level}
+        return configspec
+
+    def _add_config(self, config, overwrite=True):
+        """Add configuration settings
+
+        config is a dictionary where keys are configuration keywords,
+        and values are dictionaries with the following contents:
+
+        type (string): 'float', 'int', 'bool' or 'enum'
+
+        min, max (float/int/None): (only when type is 'float' or 'int')
+            The minimum and maximum allowed values for this setting.
+            May also be None if there are no upper/lowe limits.
+
+        units (string): (only when type is 'float' or 'int')
+            The units of this config setting.
+
+        enum (list): (only when type is 'enum')
+            A list of possible values for this setting.
+
+        default (number/bool/string/None):
+            The default value for this setting.
+
+        value (number/bool/string/None): The actual value for this setting.
+            This is updated with self.set_config(key, value) and retrieved
+            with self.get_config(key)
+
+        description (string):
+            A description of this config setting, for users/documentation/GUIs.
+
+        level (int): A parameter to determine the level of exposure in GUIs
+            1 self.CONFIG_LEVEL_ESSENTIAL: important setting which user has to consider
+            2 self.CONFIG_LEVEL_BASIC: setting which many users may consider
+            3 self.CONFIG_LEVEL_ADVANCED: setting relevant only to advanced users
+
+        """
+
+        caller = inspect.stack()[1]
+        caller = os.path.splitext(os.path.basename(caller.filename))[0]
+        self.logger.debug('Adding %i config items from %s' % (len(config), caller))
+        if not hasattr(self, '_config'):
+            self._config = {}
+        remove = []
+        for c, i in config.items():  # Check that provided config is conistent
+            if c in self._config:
+                if overwrite is False:
+                    self.logger.debug('  Config item %s is already specified, not overwriting' % c)
+                    remove.append(c)
+                else:
+                    self.logger.debug('  Overwriting config item %s' % c)
+            for p in ['type', 'description', 'level']:
+                if p not in i:
+                    raise ValueError('"%s" must be specified for config item %s' % (p, c))
+            if i['level'] != self.CONFIG_LEVEL_ESSENTIAL and 'default' not in i:#or i['default'] is None:
+                raise ValueError('A default value must be provided for config item %s' % c)
+            if i['type'] == 'enum':
+                if 'enum' not in i or not isinstance(i['enum'], list):
+                    raise ValueError('"enum" of type list must be provided for config item %s' % (c))
+            elif i['type'] in ['float', 'int']:
+                for p in ['min', 'max', 'units']:
+                    if p not in i:
+                        raise ValueError('"%s" not provided for config item %s' % (p, c))
+            elif i['type'] == 'bool':
+                pass  # no check for bool
+            else:
+                raise ValueError('Config type "%s" (%s) is not defined. Valid options are: '
+                                 'float, int, enum, bool' % (i['type'], c))
+            if 'default' in i:
+                i['value'] = i['default']
+        for r in remove:
+            del config[r]
+        self._config.update(config)
+
+    def set_config(self, key, value):
+        if not key in self._config:
+            raise ValueError('No config setting named %s' % key)
+        i = self._config[key]
+        if i['type'] == 'bool':
+            if value not in [True, False]:
+                raise ValueError('Config value must be True or False')
+        elif i['type'] in ['float', 'int']:
+            if value < i['min'] or value > i['max']:
+                raise ValueError('Config value must be between %s and %s' % (i['min'], i['max']))
+            if i['type'] == 'float':
+                value = np.float(value)
+            elif i['type'] == 'int':
+                value = np.int(value)
+        elif i['type'] == 'enum':
+            if value not in i['enum']:
+                if len(i['enum']) > 5:
+                    import difflib
+                    matches = difflib.get_close_matches(value, i['enum'], n=20, cutoff=.3)
+                    containing = [e for e in i['enum'] if value in e]
+                    matches = list(set(matches) | set(containing))
+                    if len(matches) > 0:
+                        matches.sort()
+                        suggestion = '\nDid you mean any of these?\n%s' % str(matches)
+                    else:
+                        suggestion = ''
+                    raise ValueError('Wrong configuration, possible values are:\n\t%s\n%s' %
+                                     (i['enum'], suggestion))
+
+        self._config[key]['value'] = value
+
+    def _set_config_default(self, key, value):
+        """Update both default and actual value of a config setting"""
+        self.set_config(key, value)
+        self._config[key]['default'] = self.get_config(key)
+
+    def get_config(self, key):
+        if not key in self._config:
+            raise ValueError('No config setting named %s' % key)
+        return(self._config[key]['value'])
 
     def add_metadata(self, key, value):
         """Add item to metadata dictionary, for export as netCDF global attributes"""
@@ -891,15 +909,16 @@ class OpenDriftSimulation(PhysicsMethods):
         # Discard any existing readers which are not relevant
         self.discard_irrelevant_readers()
 
-        truncate_depth = self.get_config('drift:truncate_ocean_model_below_m')
-        if truncate_depth is not None:
-            self.logger.debug('Truncating ocean models below %s m' % truncate_depth)
-            z = z.copy()
-            z[z<-truncate_depth] = -truncate_depth
-            if self.required_profiles_z_range is not None:
-                self.required_profiles_z_range = np.array(
-                    self.required_profiles_z_range)
-                self.required_profiles_z_range[self.required_profiles_z_range<-truncate_depth] = -truncate_depth
+        if 'drift:truncate_ocean_model_below_m' in self._config:
+            truncate_depth = self.get_config('drift:truncate_ocean_model_below_m')
+            if truncate_depth is not None:
+                self.logger.debug('Truncating ocean models below %s m' % truncate_depth)
+                z = z.copy()
+                z[z<-truncate_depth] = -truncate_depth
+                if self.required_profiles_z_range is not None:
+                    self.required_profiles_z_range = np.array(
+                        self.required_profiles_z_range)
+                    self.required_profiles_z_range[self.required_profiles_z_range<-truncate_depth] = -truncate_depth
 
         # Initialise more lazy readers if necessary
         missing_variables = ['missingvar']
@@ -1124,7 +1143,7 @@ class OpenDriftSimulation(PhysicsMethods):
         #######################################################
         # Parameterisation of unavailable variables
         #######################################################
-        if self.get_config('drift:use_tabularised_stokes_drift') is True:
+        if 'drift:use_tabularised_stokes_drift' in self._config and self.get_config('drift:use_tabularised_stokes_drift') is True:
             if 'x_wind' not in variables:
                 self.logger.debug('No wind available to calculate Stokes drift')
             else:
@@ -1260,8 +1279,13 @@ class OpenDriftSimulation(PhysicsMethods):
         Also assigns a unique ID to each particle, monotonically increasing."""
 
         # prepare time
+        if isinstance(time, np.ndarray):
+            time = list(time)
         if not isinstance(time, list):
-            time = [time]*len(elements)  # Convert to array of same length
+            time = [time]
+        if len(time) == 1 and len(elements) > 1:
+            time = time*len(elements)
+
         if not hasattr(self, 'elements_scheduled'):
             self.elements_scheduled = elements
             self.elements_scheduled_time = np.array(time)
@@ -1541,22 +1565,15 @@ class OpenDriftSimulation(PhysicsMethods):
                 kwargs['z'] = \
                     -env['sea_floor_depth_below_sea_level'].astype('float32') + meters_above_seafloor
 
-            # Recursively seeding elements around each point
-            scalarargs = {}
+            # Seeding array and returning
             if 'time_array' not in locals():
                 time_array = time
-            for i in range(len(lon)):
-                for kwarg in kwargs:
-                    try:
-                        scalarargs[kwarg] = kwargs[kwarg][i]
-                    except:
-                        scalarargs[kwarg] = kwargs[kwarg]
-                # Make sure to call seed function of base class,
-                # not of a specific Children class
-                OpenDriftSimulation.seed_elements(
-                    self, lon=[lon[i]], lat=[lat[i]], radius=radius_array[i],
-                    number=int(number_array[i]),
-                    time=time_array[i], cone=False, **scalarargs)
+            if isinstance(time_array[0], list):
+                time_array = [t[0] for t in time_array]
+
+            elements = self.ElementType(lon=lon, lat=lat, **kwargs)
+            time_array = np.array(time_array)
+            self.schedule_elements(elements, time_array)
             return
 
         # Below we have only for single points
@@ -1618,6 +1635,52 @@ class OpenDriftSimulation(PhysicsMethods):
         elements = self.ElementType(**kwargs)
 
         self.schedule_elements(elements, time_array)
+
+    def seed_repeated_segment(self, lons, lats,
+                              start_time, end_time, time_interval=None,
+                              number_per_segment=None,
+                              total_number=None, **kwargs):
+        """Seed elements repeatedly in time along a segment.
+
+        The segment goes from lon[0],lat[0] to lon[1],lat[1].
+        The number of elements should be proved as either:
+        1) number_per_segment, in which case total number of elements
+           is number_per_segment * len(times), or
+        2) total_number, in which case the number of elements
+           per segment is: total_number / len(times).
+           Any extra elements are duplicated along at the first segment.
+       
+        """
+
+        numtimes = int((end_time-start_time).total_seconds()/
+                        time_interval.total_seconds() + 1)
+        times = [start_time+i*time_interval for i in range(numtimes)]
+
+        geod = pyproj.Geod(ellps='WGS84')
+        if number_per_segment is None:
+            number_per_segment = np.int(np.floor(total_number/numtimes))
+
+        s_lonlats= geod.npts(lons[0], lats[0], lons[1], lats[1],
+                             number_per_segment, radians=False)
+        slon, slat = list(zip(*s_lonlats))
+        slon = np.atleast_1d(slon)
+        slat = np.atleast_1d(slat)
+
+        lon, time = np.meshgrid(slon, times)
+        lat, time = np.meshgrid(slat, times)
+        lon = lon.ravel()
+        lat = lat.ravel()
+        time = time.ravel()
+
+        if total_number is not None:
+            additional_elements = total_number - len(lon.ravel())
+            print('Repeating the %d last points, to obtain %d elements' %
+                  (additional_elements, total_number))
+            lon = np.concatenate((lon, lon[-additional_elements::]))
+            lat = np.concatenate((lat, lat[-additional_elements::]))
+            time = np.concatenate((time, time[-additional_elements::]))
+
+        self.seed_elements(lon=lon, lat=lat, time=time, **kwargs)
 
     def seed_within_polygon(self, lons, lats, number, **kwargs):
         """Seed a number of elements within given polygon.
@@ -1979,12 +2042,6 @@ class OpenDriftSimulation(PhysicsMethods):
 
         self.timer_end('configuration')
         self.timer_start('preparing main loop')
-        # Check that configuration is proper
-        validation = self.configobj.validate(validate.Validator())
-        if validation is True:
-            self.logger.info('Config validation OK')
-        else:
-            raise ValueError('Configuration error: ' + str(validation))
 
         if self.num_elements_scheduled() == 0:
             raise ValueError('Please seed elements before starting a run.')
@@ -2551,22 +2608,52 @@ class OpenDriftSimulation(PhysicsMethods):
         provide corners=[lonmin, lonmax, latmin, latmax] for specific map selection
         """
 
-        lons, lats = self.get_lonlats()
-
         # Initialise map
-        if corners==None:
-            lonmin = np.nanmin(lons) - buffer*2
-            lonmax = np.nanmax(lons) + buffer*2
-            latmin = np.nanmin(lats) - buffer
-            latmax = np.nanmax(lats) + buffer
-        else:
+        if corners is not None:
+            lons, lats = self.get_lonlats()  # TODO: to be removed
             lonmin = corners[0]
             lonmax = corners[1]
             latmin = corners[2]
             latmax = corners[3]
+        elif hasattr(self, 'ds'):
+            lons = self.ds.lon
+            lats = self.ds.lat
+            if hasattr(self, 'lonmin'):
+                lonmin = self.lonmin
+                lonmax = self.lonmax
+                latmin = self.latmin
+                latmax = self.latmax
+            else:
+                self.logger.debug('Finding min longitude...')
+                lonmin = np.nanmin(self.ds.lon)
+                self.logger.debug('Finding max longitude...')
+                lonmax = np.nanmax(self.ds.lon)
+                self.logger.debug('Finding min latitude...')
+                latmin = np.nanmin(self.ds.lat)
+                self.logger.debug('Finding max latitude...')
+                latmax = np.nanmax(self.ds.lat)
+                self.lonmin = lonmin
+                self.lonmax = lonmax
+                self.latmin = latmin
+                self.latmax = latmax
+                if os.path.exists(self.analysis_file):
+                    self.af = Dataset(self.analysis_file, 'a')
+                else:
+                    self.af = Dataset(self.analysis_file, 'w')
+                self.af.lonmin = lonmin
+                self.af.lonmax = lonmax
+                self.af.latmin = latmin
+                self.af.latmax = latmax
+                self.af.close()
+        else:
+            lons, lats = self.get_lonlats()
+            lonmin = np.nanmin(lons) - buffer*2
+            lonmax = np.nanmax(lons) + buffer*2
+            latmin = np.nanmin(lats) - buffer
+            latmax = np.nanmax(lats) + buffer
 
-        if fast:
-            self.logger.warning("plotting fast. this will make your plots less accurate.")
+        if fast is True:
+            self.logger.warning("plotting fast. This will make your plots less accurate.")
 
             import matplotlib.style as mplstyle
             mplstyle.use(['fast'])
@@ -2671,12 +2758,16 @@ class OpenDriftSimulation(PhysicsMethods):
         fig.canvas.draw()
         fig.set_tight_layout(True)
 
-        try:
-            firstlast = np.ma.notmasked_edges(lons, axis=1)
-            index_of_first = firstlast[0][1]
-            index_of_last = firstlast[1][1]
-        except:
-            index_of_last = 0
+        if not hasattr(self, 'ds'):
+            try:
+                firstlast = np.ma.notmasked_edges(lons, axis=1)
+                index_of_first = firstlast[0][1]
+                index_of_last = firstlast[1][1]
+            except:
+                index_of_last = 0
+        else:
+            index_of_first = None
+            index_of_last = None
 
         try:  # Activate figure zooming
             mng = plt.get_current_fig_manager()
@@ -2712,12 +2803,12 @@ class OpenDriftSimulation(PhysicsMethods):
                   colorbar=True, cmap=None, density=False, show_elements=True,
                   show_trajectories=False, hide_landmask=False,
                   density_pixelsize_m=1000, unitfactor=1, lcs=None,
-                  surface_only=False, markersize=20,
+                  surface_only=False, markersize=20, origin_marker=None,
                   legend=None, legend_loc='best', fps=10, lscale=None, fast=False):
         """Animate last run."""
 
 
-        if self.num_elements_total() == 0:
+        if self.num_elements_total() == 0 and not hasattr(self, 'ds'):
             raise ValueError('Please run simulation before animating')
 
         start_time = datetime.now()
@@ -2739,7 +2830,22 @@ class OpenDriftSimulation(PhysicsMethods):
         else:
             if density is True:
                 density_weight = None
-
+        if density is True:  # Get density arrays
+            if hasattr(self, 'ds'):  # opened with Xarray
+                if origin_marker is None:
+                    origin_marker = 0
+                    per_origin_marker = False
+                else:
+                    per_origin_marker = True
+                H, lon_array, lat_array = self.get_density_xarray(pixelsize_m=density_pixelsize_m,
+                                            per_origin_marker=per_origin_marker)
+                H = H[origin_marker]  # Presently only for origin_marker = 0
+            else:
+                H, H_submerged, H_stranded, lon_array, lat_array = \
+                    self.get_density_array(pixelsize_m=density_pixelsize_m,
+                                           weight=density_weight)
+                H = H + H_submerged + H_stranded
+         
         # x, y are longitude, latitude -> i.e. in a PlateCarree CRS
         gcrs = ccrs.PlateCarree()
 
@@ -2808,7 +2914,7 @@ class OpenDriftSimulation(PhysicsMethods):
 
         # Find map coordinates and plot points with empty data
         fig, ax, crs, x, y, index_of_first, index_of_last = \
-            self.set_up_map(buffer=buffer,corners=corners, lscale=lscale,
+            self.set_up_map(buffer=buffer, corners=corners, lscale=lscale,
                             fast=fast, hide_landmask=hide_landmask)
 
         if surface_only is True:
@@ -2819,7 +2925,7 @@ class OpenDriftSimulation(PhysicsMethods):
         if show_trajectories is True:
             ax.plot(x, y, color='gray', alpha=.1, transform = gcrs)
 
-        if color is not False:
+        if color is not False and show_elements is True:
             if isinstance(color, basestring):
                 colorarray = self.get_property(color)[0].T
                 colorarray = colorarray*unitfactor
@@ -2855,8 +2961,9 @@ class OpenDriftSimulation(PhysicsMethods):
                                   transform = gcrs)
 
         times = self.get_time_array()[0]
-        index_of_last_deactivated = \
-            index_of_last[self.elements_deactivated.ID-1]
+        if show_elements is True:
+            index_of_last_deactivated = \
+                index_of_last[self.elements_deactivated.ID-1]
         if legend is None:
             legend = ['']
 
@@ -2895,10 +3002,6 @@ class OpenDriftSimulation(PhysicsMethods):
 
         if density is True:
             cmap.set_under('w')
-            H, H_submerged, H_stranded, lon_array, lat_array = \
-                self.get_density_array(pixelsize_m=density_pixelsize_m,
-                                       weight=density_weight)
-            H = H + H_submerged + H_stranded
             H = np.ma.masked_where(H==0, H)
             lat_array, lon_array = np.meshgrid(lat_array, lon_array)
             if vmax is None:
@@ -3137,7 +3240,7 @@ class OpenDriftSimulation(PhysicsMethods):
         # x, y are longitude, latitude -> i.e. in a PlateCarree CRS
         gcrs = ccrs.PlateCarree()
         fig, ax, crs, x, y, index_of_first, index_of_last = \
-            self.set_up_map(buffer=buffer,corners=corners, lscale=lscale, fast=fast, hide_landmask=hide_landmask, **kwargs)
+            self.set_up_map(buffer=buffer, corners=corners, lscale=lscale, fast=fast, hide_landmask=hide_landmask, **kwargs)
 
         markercolor = self.plot_comparison_colors[0]
 
@@ -3485,6 +3588,83 @@ class OpenDriftSimulation(PhysicsMethods):
 
         return map_x, map_y, scalar, u_component, v_component
 
+    def get_density_xarray(self, pixelsize_m, weight=None, per_origin_marker=False):
+        from xhistogram.xarray import histogram
+
+        if os.path.exists(self.analysis_file) and 'lon_bin' in xr.open_dataset(self.analysis_file):  # Import from file
+            self.logger.info('Importing from saved analysis file')
+            self.af = xr.open_dataset(self.analysis_file)
+            histograms = []
+            for var in self.af.variables:
+                if var[0:9] == 'histogram':
+                    histograms.append(self.af[var])
+            lonbin = self.af.lon_bin.values
+            latbin = self.af.lat_bin.values
+            deltalon = (lonbin[1]-lonbin[0])
+            lonbin = np.append(lonbin, lonbin[-1] + deltalon) - deltalon/2
+            deltalat = (latbin[1]-latbin[0])
+            latbin = np.append(latbin, latbin[-1] + deltalat) - deltalat/2
+            self.af.close()
+
+        else:  # Calculate
+            start = datetime.now()
+            self.logger.info('Calculating density array, this may take some time...')
+            deltalat = pixelsize_m/111000.0  # m to degrees
+            if hasattr(self, 'lonmin'):
+                lonmin = self.lonmin
+                lonmax = self.lonmax
+                latmin = self.latmin
+                latmax = self.latmax
+            else:
+                self.logger.debug('Finding min and max of lon and lat...')
+                lonmin = np.nanmin(self.ds.lon)
+                lonmax = np.nanmax(self.ds.lon)
+                latmin = np.nanmin(self.ds.lat)
+                latmax = np.nanmax(self.ds.lat)
+                if os.path.exists(self.analysis_file):
+                    self.af = Dataset(self.analysis_file, 'a')
+                else:
+                    self.af = Dataset(self.analysis_file, 'w')
+                self.af.lonmin = lonmin
+                self.af.lonmax = lonmax
+                self.af.latmin = latmin
+                self.af.latmax = latmax
+                self.af.close()
+
+            deltalon = deltalat/np.cos(np.radians((latmin+latmax)/2))
+            latbin = np.arange(latmin-deltalat, latmax+deltalat, deltalat)
+            lonbin = np.arange(lonmin-deltalon, lonmax+deltalon, deltalon)
+
+            histograms = []
+            if per_origin_marker is True:
+                max_om = self.ds.origin_marker.max().compute().values
+                for om in range(max_om+1):
+                    self.logger.info('\tcalculating for origin_marker %s...' % om)
+                    h = histogram(self.ds.lon.where(self.ds.origin_marker==om),
+                                  self.ds.lat.where(self.ds.origin_marker==om), bins=[lonbin, latbin],
+                                  dim=['trajectory'])
+                    h.name = 'histogram_lon_lat_' + str(om)
+                    histograms.append(h)
+            else:
+                h = histogram(self.ds.lon, self.ds.lat, bins=[lonbin, latbin],
+                              dim=['trajectory'])
+                histograms = [h]
+
+            if self.analysis_file is not None:
+                self.logger.info('Writing density array to analysis file: %s'
+                                 % self.analysis_file)
+                for om, h in enumerate(histograms):
+                    if os.path.exists(self.analysis_file):
+                        mode = 'a'
+                    else:
+                        mode = 'w'
+                    self.logger.info('\twriting for origin_marker %s...' % om)
+                    h.to_netcdf(self.analysis_file, mode)
+            self.logger.info('Time to calculate density array: %s' %
+                             (datetime.now() - start))
+
+        return histograms, lonbin, latbin
+
     def get_density_array(self, pixelsize_m, weight=None):
         lon = self.get_property('lon')[0]
         lat = self.get_property('lat')[0]
@@ -3571,7 +3751,6 @@ class OpenDriftSimulation(PhysicsMethods):
         lon_array = (lon_array[0:-1] + lon_array[1::])/2
         lat_array = (lat_array[0:-1] + lat_array[1::])/2
 
-        from netCDF4 import Dataset, date2num
         nc = Dataset(filename, 'w')
         nc.createDimension('lon', len(lon_array))
         nc.createDimension('lat', len(lat_array))
@@ -3905,7 +4084,6 @@ class OpenDriftSimulation(PhysicsMethods):
             # This assumes that the calling script is two frames up in the stack. If
             # _save_animation is called through a more deeply nested method, it will
             # not give the correct result.
-            import inspect
             caller = inspect.stack()[2]
             caller = os.path.splitext(os.path.basename(caller.filename))[0]
 
@@ -3916,16 +4094,16 @@ class OpenDriftSimulation(PhysicsMethods):
             else:
                 adir = os.path.realpath('../docs/source/gallery/animations')
 
-            if not hasattr(OpenDriftSimulation, '__anim_no__'):
-                OpenDriftSimulation.__anim_no__ = { }
+            if not hasattr(self, '__anim_no__'):
+                self.__anim_no__ = { }
 
-            if not hasattr(OpenDriftSimulation.__anim_no__, caller):
-                OpenDriftSimulation.__anim_no__[caller] = 0
+            if caller not in  self.__anim_no__:
+                self.__anim_no__[caller] = 0
 
             os.makedirs(adir, exist_ok=True)
 
-            filename = '%s_%d.gif' % (caller, OpenDriftSimulation.__anim_no__[caller])
-            OpenDriftSimulation.__anim_no__[caller] += 1
+            filename = '%s_%d.gif' % (caller, self.__anim_no__[caller])
+            self.__anim_no__[caller] += 1
 
             filename = os.path.join(adir, filename)
 
@@ -3971,6 +4149,13 @@ class OpenDriftSimulation(PhysicsMethods):
             self.logger.info('No reader provided, using first available:')
             reader = list(self.readers.items())[0][1]
             self.logger.info(reader.name)
+        if isinstance(reader, pyproj.Proj):
+            proj = reader
+        elif isinstance(reader,str):
+            proj = pyproj.Proj(reader)
+        else:
+            proj = reader.proj
+
         import scipy.ndimage as ndimage
         from opendrift.models.physics_methods import ftle
 
@@ -3986,7 +4171,7 @@ class OpenDriftSimulation(PhysicsMethods):
             ys = np.arange(ymin, ymax, delta)
 
         X, Y = np.meshgrid(xs, ys)
-        lons, lats = reader.xy2lonlat(X, Y)
+        lons, lats = proj(X, Y, inverse=True)
 
         if time is None:
             time = reader.start_time
@@ -4005,7 +4190,7 @@ class OpenDriftSimulation(PhysicsMethods):
                 self.seed_elements(lons.ravel(), lats.ravel(),
                                    time=t, z=z)
                 self.run(duration=duration, time_step=time_step)
-                f_x1, f_y1 = reader.lonlat2xy(
+                f_x1, f_y1 = proj(
                     self.history['lon'].T[-1].reshape(X.shape),
                     self.history['lat'].T[-1].reshape(X.shape))
                 lcs['RLCS'][i,:,:] = ftle(f_x1-X, f_y1-Y, delta, T)
@@ -4015,7 +4200,7 @@ class OpenDriftSimulation(PhysicsMethods):
                 self.seed_elements(lons.ravel(), lats.ravel(),
                                    time=t+duration, z=z)
                 self.run(duration=duration, time_step=-time_step)
-                b_x1, b_y1 = reader.lonlat2xy(
+                b_x1, b_y1 = proj(
                     self.history['lon'].T[-1].reshape(X.shape),
                     self.history['lat'].T[-1].reshape(X.shape))
                 lcs['ALCS'][i,:,:] = ftle(b_x1-X, b_y1-Y, delta, T)
